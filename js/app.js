@@ -252,11 +252,15 @@ function csvEscape(value) {
   return str;
 }
 
-function checksToCsvText(checks) {
-  if (!Array.isArray(checks) || checks.length === 0) return '';
-  return checks
+function summarizeChecks(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return { count: '-', issues: '' };
+  const total = checks.length;
+  const done = checks.filter((c) => c.checked).length;
+  const issues = checks
+    .filter((c) => !c.checked || c.note)
     .map((c) => `${c.checked ? '✓' : '✗'}${c.item_label}${c.note ? `(備考:${c.note})` : ''}`)
-    .join(' / ');
+    .join('\n');
+  return { count: `${done}/${total}`, issues };
 }
 
 function buildFlightsCSV(flights) {
@@ -275,38 +279,55 @@ function buildFlightsCSV(flights) {
     '天候',
     '風速(m/s)',
     '気温(℃)',
-    '飛行前チェック',
-    '飛行後チェック',
+    '飛行前チェック完了数',
+    '飛行前チェック特記事項',
+    '飛行後チェック完了数',
+    '飛行後チェック特記事項',
     '特記事項・異常事象',
     '備考',
     '状態',
     '作成日時',
   ];
-  const rows = flights.map((f) => [
-    f.flight_date,
-    f.pilot_name,
-    f.drone_name_snapshot,
-    f.purpose,
-    f.flight_area,
-    Array.isArray(f.specific_flight_types) ? f.specific_flight_types.join('、') : '',
-    f.departure_place,
-    f.arrival_place,
-    f.start_time,
-    f.end_time,
-    f.flight_duration_min,
-    f.weather,
-    f.wind_speed,
-    f.temperature,
-    checksToCsvText(f.pre_checks),
-    checksToCsvText(f.post_checks),
-    f.incident_notes,
-    f.remarks,
-    f.status === 'draft' ? '下書き' : '完了',
-    f.created_at,
-  ]);
+  const rows = flights.map((f) => {
+    const pre = summarizeChecks(f.pre_checks);
+    const post = summarizeChecks(f.post_checks);
+    return [
+      f.flight_date,
+      f.pilot_name,
+      f.drone_name_snapshot,
+      f.purpose,
+      f.flight_area,
+      Array.isArray(f.specific_flight_types) ? f.specific_flight_types.join('、') : '',
+      f.departure_place,
+      f.arrival_place,
+      f.start_time,
+      f.end_time,
+      f.flight_duration_min,
+      f.weather,
+      f.wind_speed,
+      f.temperature,
+      pre.count,
+      pre.issues,
+      post.count,
+      post.issues,
+      f.incident_notes,
+      f.remarks,
+      f.status === 'draft' ? '下書き' : '完了',
+      f.created_at,
+    ];
+  });
   const lines = [headers, ...rows].map((row) => row.map(csvEscape).join(','));
   // Excelで文字化けしないようUTF-8 BOMを付与
   return '\uFEFF' + lines.join('\r\n');
+}
+
+function flightMonthKey(dateStr) {
+  return (dateStr || '').slice(0, 7); // "YYYY-MM"
+}
+
+function formatMonthKey(key) {
+  const [y, m] = key.split('-');
+  return `${y}年${Number(m)}月`;
 }
 
 function downloadTextFile(filename, content, mimeType) {
@@ -324,11 +345,10 @@ function downloadTextFile(filename, content, mimeType) {
 // ==========================================================
 // ダッシュボード
 // ==========================================================
-async function renderDashboard() {
-  appEl.innerHTML = `<p class="subtitle">読み込み中...</p>`;
-  const flights = await api.flights.list();
+let dashboardMonthFilter = '';
 
-  const rows = flights
+function renderFlightRows(list) {
+  return list
     .map((f) => {
       const badge =
         f.status === 'draft'
@@ -346,6 +366,37 @@ async function renderDashboard() {
         </tr>`;
     })
     .join('');
+}
+
+function renderFlightsTableSection(list, hasAnyFlights) {
+  if (list.length === 0) {
+    return hasAnyFlights
+      ? `<div class="empty-state">この年月の飛行記録はありません。</div>`
+      : `<div class="empty-state">まだ飛行記録がありません。「新規飛行を記録」から始めましょう。</div>`;
+  }
+  return `<div class="table-scroll"><table>
+      <thead>
+        <tr><th>日付</th><th>操縦者</th><th>機体</th><th>目的</th><th>経路</th><th>飛行時間</th><th>状態</th></tr>
+      </thead>
+      <tbody>${renderFlightRows(list)}</tbody>
+    </table></div>`;
+}
+
+async function renderDashboard() {
+  appEl.innerHTML = `<p class="subtitle">読み込み中...</p>`;
+  const flights = await api.flights.list();
+
+  const monthKeys = [...new Set(flights.map((f) => flightMonthKey(f.flight_date)).filter(Boolean))]
+    .sort()
+    .reverse();
+  if (dashboardMonthFilter && !monthKeys.includes(dashboardMonthFilter)) {
+    dashboardMonthFilter = '';
+  }
+
+  function filteredFlights() {
+    if (!dashboardMonthFilter) return flights;
+    return flights.filter((f) => flightMonthKey(f.flight_date) === dashboardMonthFilter);
+  }
 
   appEl.innerHTML = `
     <div class="page-head">
@@ -360,17 +411,43 @@ async function renderDashboard() {
     </div>
     <div class="card">
       ${
-        flights.length === 0
-          ? `<div class="empty-state">まだ飛行記録がありません。「新規飛行を記録」から始めましょう。</div>`
-          : `<div class="table-scroll"><table>
-              <thead>
-                <tr><th>日付</th><th>操縦者</th><th>機体</th><th>目的</th><th>経路</th><th>飛行時間</th><th>状態</th></tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table></div>`
+        monthKeys.length > 0
+          ? `<div class="field" style="max-width:240px; margin-bottom:16px;">
+              <label>表示する年月</label>
+              <select id="month-filter">
+                <option value="">すべて表示</option>
+                ${monthKeys
+                  .map(
+                    (k) =>
+                      `<option value="${k}" ${dashboardMonthFilter === k ? 'selected' : ''}>${formatMonthKey(k)}</option>`
+                  )
+                  .join('')}
+              </select>
+            </div>`
+          : ''
       }
+      <div id="flights-table-wrap">${renderFlightsTableSection(filteredFlights(), flights.length > 0)}</div>
     </div>
   `;
+
+  function wireRowClicks() {
+    appEl.querySelectorAll('.flight-row').forEach((row) => {
+      row.addEventListener('click', () => navigate(`/flight/${row.dataset.id}`));
+    });
+  }
+  wireRowClicks();
+
+  const monthFilterEl = document.getElementById('month-filter');
+  if (monthFilterEl) {
+    monthFilterEl.addEventListener('change', (e) => {
+      dashboardMonthFilter = e.target.value;
+      document.getElementById('flights-table-wrap').innerHTML = renderFlightsTableSection(
+        filteredFlights(),
+        flights.length > 0
+      );
+      wireRowClicks();
+    });
+  }
 
   document.getElementById('btn-new-flight').addEventListener('click', () => {
     resetDraft();
@@ -383,22 +460,22 @@ async function renderDashboard() {
     btn.textContent = '準備中...';
     try {
       const fullFlights = await api.flights.listFull();
-      if (fullFlights.length === 0) {
-        showToast('飛行記録がありません');
+      const target = dashboardMonthFilter
+        ? fullFlights.filter((f) => flightMonthKey(f.flight_date) === dashboardMonthFilter)
+        : fullFlights;
+      if (target.length === 0) {
+        showToast('対象の飛行記録がありません');
         return;
       }
-      const csv = buildFlightsCSV(fullFlights);
-      const today = new Date().toISOString().slice(0, 10);
-      downloadTextFile(`飛行記録_${today}.csv`, csv, 'text/csv;charset=utf-8;');
+      const csv = buildFlightsCSV(target);
+      const suffix = dashboardMonthFilter || new Date().toISOString().slice(0, 10);
+      downloadTextFile(`飛行記録_${suffix}.csv`, csv, 'text/csv;charset=utf-8;');
     } catch (err) {
       showToast('CSV出力に失敗しました: ' + err.message);
     } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
     }
-  });
-  appEl.querySelectorAll('.flight-row').forEach((row) => {
-    row.addEventListener('click', () => navigate(`/flight/${row.dataset.id}`));
   });
 }
 
