@@ -76,29 +76,35 @@ const api = {
   },
 
   flights: {
-    async list() {
+    async _fetchAllSorted() {
       const snap = await db.collection(FLIGHTS_COL).get();
       const flights = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      return flights
-        .sort(
-          (a, b) =>
-            (b.flight_date || '').localeCompare(a.flight_date || '') ||
-            (b.created_at_ms || 0) - (a.created_at_ms || 0)
-        )
-        .map((f) => ({
-          id: f.id,
-          flight_date: f.flight_date,
-          pilot_name: f.pilot_name,
-          drone_name_snapshot: f.drone_name_snapshot,
-          purpose: f.purpose,
-          departure_place: f.departure_place,
-          arrival_place: f.arrival_place,
-          start_time: f.start_time,
-          end_time: f.end_time,
-          flight_duration_min: f.flight_duration_min,
-          status: f.status,
-          created_at: f.created_at,
-        }));
+      return flights.sort(
+        (a, b) =>
+          (b.flight_date || '').localeCompare(a.flight_date || '') ||
+          (b.created_at_ms || 0) - (a.created_at_ms || 0)
+      );
+    },
+    async list() {
+      const flights = await this._fetchAllSorted();
+      return flights.map((f) => ({
+        id: f.id,
+        flight_date: f.flight_date,
+        pilot_name: f.pilot_name,
+        drone_name_snapshot: f.drone_name_snapshot,
+        purpose: f.purpose,
+        departure_place: f.departure_place,
+        arrival_place: f.arrival_place,
+        start_time: f.start_time,
+        end_time: f.end_time,
+        flight_duration_min: f.flight_duration_min,
+        status: f.status,
+        created_at: f.created_at,
+      }));
+    },
+    // CSVエクスポート用: 全フィールドを含む完全な記録一覧
+    async listFull() {
+      return this._fetchAllSorted();
     },
     async get(id) {
       const doc = await db.collection(FLIGHTS_COL).doc(id).get();
@@ -204,8 +210,8 @@ const api = {
     async create(data) {
       const drone = {
         name: (data.name || '').trim(),
-        model: data.model || null,
-        serial_number: data.serial_number || null,
+        pilot_name: data.pilot_name || null,
+        registration_number: data.registration_number || null,
         created_at: nowLocalString(),
         created_at_ms: Date.now(),
       };

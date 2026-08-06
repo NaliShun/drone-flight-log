@@ -243,6 +243,84 @@ function fmtDuration(min) {
   return `${min}分`;
 }
 
+// ---- CSVエクスポート ----
+function csvEscape(value) {
+  const str = value === null || value === undefined ? '' : String(value);
+  if (/["\r\n,]/.test(str)) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function checksToCsvText(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return '';
+  return checks
+    .map((c) => `${c.checked ? '✓' : '✗'}${c.item_label}${c.note ? `(備考:${c.note})` : ''}`)
+    .join(' / ');
+}
+
+function buildFlightsCSV(flights) {
+  const headers = [
+    '飛行年月日',
+    '操縦者',
+    '使用機体',
+    '飛行目的',
+    '飛行エリア',
+    '特定飛行',
+    '出発地',
+    '到着地',
+    '離陸時刻',
+    '着陸時刻',
+    '飛行時間(分)',
+    '天候',
+    '風速(m/s)',
+    '気温(℃)',
+    '飛行前チェック',
+    '飛行後チェック',
+    '特記事項・異常事象',
+    '備考',
+    '状態',
+    '作成日時',
+  ];
+  const rows = flights.map((f) => [
+    f.flight_date,
+    f.pilot_name,
+    f.drone_name_snapshot,
+    f.purpose,
+    f.flight_area,
+    Array.isArray(f.specific_flight_types) ? f.specific_flight_types.join('、') : '',
+    f.departure_place,
+    f.arrival_place,
+    f.start_time,
+    f.end_time,
+    f.flight_duration_min,
+    f.weather,
+    f.wind_speed,
+    f.temperature,
+    checksToCsvText(f.pre_checks),
+    checksToCsvText(f.post_checks),
+    f.incident_notes,
+    f.remarks,
+    f.status === 'draft' ? '下書き' : '完了',
+    f.created_at,
+  ]);
+  const lines = [headers, ...rows].map((row) => row.map(csvEscape).join(','));
+  // Excelで文字化けしないようUTF-8 BOMを付与
+  return '\uFEFF' + lines.join('\r\n');
+}
+
+function downloadTextFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ==========================================================
 // ダッシュボード
 // ==========================================================
@@ -275,7 +353,10 @@ async function renderDashboard() {
         <h1>飛行記録一覧</h1>
         <p class="subtitle">飛行前チェック → 飛行日誌 → 飛行後チェックをまとめて記録します</p>
       </div>
-      <button class="btn btn-primary" id="btn-new-flight">＋ 新規飛行を記録</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" id="btn-export-csv">⬇ CSVダウンロード</button>
+        <button class="btn btn-primary" id="btn-new-flight">＋ 新規飛行を記録</button>
+      </div>
     </div>
     <div class="card">
       ${
@@ -294,6 +375,27 @@ async function renderDashboard() {
   document.getElementById('btn-new-flight').addEventListener('click', () => {
     resetDraft();
     navigate('/new/pre');
+  });
+  document.getElementById('btn-export-csv').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-export-csv');
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '準備中...';
+    try {
+      const fullFlights = await api.flights.listFull();
+      if (fullFlights.length === 0) {
+        showToast('飛行記録がありません');
+        return;
+      }
+      const csv = buildFlightsCSV(fullFlights);
+      const today = new Date().toISOString().slice(0, 10);
+      downloadTextFile(`飛行記録_${today}.csv`, csv, 'text/csv;charset=utf-8;');
+    } catch (err) {
+      showToast('CSV出力に失敗しました: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
   });
   appEl.querySelectorAll('.flight-row').forEach((row) => {
     row.addEventListener('click', () => navigate(`/flight/${row.dataset.id}`));
@@ -458,7 +560,7 @@ async function renderLogStep() {
                   (d) =>
                     `<option value="${d.id}" ${String(draft.drone_id) === String(d.id) ? 'selected' : ''}>${escapeHtml(
                       d.name
-                    )}${d.model ? ' (' + escapeHtml(d.model) + ')' : ''}</option>`
+                    )}${d.registration_number ? ' (' + escapeHtml(d.registration_number) + ')' : ''}</option>`
                 )
                 .join('')}
             </select>
@@ -548,6 +650,13 @@ async function renderLogStep() {
 
   const form = document.getElementById('log-form');
 
+  form.drone_id.addEventListener('change', () => {
+    const selected = drones.find((d) => String(d.id) === form.drone_id.value);
+    if (selected && selected.pilot_name) {
+      form.pilot_name.value = selected.pilot_name;
+    }
+  });
+
   wireSelectOtherField(form, 'purpose');
   wireSelectOtherField(form, 'flight_area');
   wireSelectOtherField(form, 'weather');
@@ -592,17 +701,17 @@ async function renderLogStep() {
     });
   });
 
-  form.querySelectorAll('.btn-now').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      form[btn.dataset.target].value = nowHHMM();
-    });
-  });
-
   const startInput = form.start_time;
   const endInput = form.end_time;
   const durationInput = form.flight_duration_min;
+  // ユーザーが飛行時間を直接編集したら、以降は自動計算で上書きしない
+  let durationManuallyEdited = Boolean(durationInput.value);
+  durationInput.addEventListener('input', () => {
+    durationManuallyEdited = true;
+  });
   function autoCalcDuration() {
-    if (startInput.value && endInput.value && !durationInput.value) {
+    if (durationManuallyEdited) return;
+    if (startInput.value && endInput.value) {
       const [sh, sm] = startInput.value.split(':').map(Number);
       const [eh, em] = endInput.value.split(':').map(Number);
       let diff = eh * 60 + em - (sh * 60 + sm);
@@ -610,7 +719,15 @@ async function renderLogStep() {
       durationInput.value = diff;
     }
   }
+  startInput.addEventListener('change', autoCalcDuration);
   endInput.addEventListener('change', autoCalcDuration);
+
+  form.querySelectorAll('.btn-now').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      form[btn.dataset.target].value = nowHHMM();
+      autoCalcDuration();
+    });
+  });
 
   function collectDraftFromForm() {
     const fd = new FormData(form);
@@ -875,15 +992,15 @@ async function renderDrones() {
         drones.length === 0
           ? '<p class="subtitle">登録された機体はありません。</p>'
           : `<div class="table-scroll"><table>
-              <thead><tr><th>機体名</th><th>型番</th><th>シリアル番号</th><th></th></tr></thead>
+              <thead><tr><th>機体名</th><th>操縦者</th><th>機体登録番号</th><th></th></tr></thead>
               <tbody>
                 ${drones
                   .map(
                     (d) => `
                   <tr data-id="${d.id}">
                     <td>${escapeHtml(d.name)}</td>
-                    <td>${escapeHtml(d.model || '-')}</td>
-                    <td>${escapeHtml(d.serial_number || '-')}</td>
+                    <td>${escapeHtml(d.pilot_name || '-')}</td>
+                    <td>${escapeHtml(d.registration_number || '-')}</td>
                     <td><button class="btn btn-sm btn-danger delete-drone">削除</button></td>
                   </tr>`
                   )
@@ -897,12 +1014,12 @@ async function renderDrones() {
           <input type="text" name="name" required placeholder="例: Mavic 3号機" />
         </div>
         <div class="field">
-          <label>型番</label>
-          <input type="text" name="model" placeholder="例: DJI Mavic 3" />
+          <label>操縦者</label>
+          <input type="text" name="pilot_name" placeholder="例: 山田 太郎" />
         </div>
         <div class="field">
-          <label>シリアル番号</label>
-          <input type="text" name="serial_number" />
+          <label>機体登録番号</label>
+          <input type="text" name="registration_number" placeholder="例: JU12345678" />
         </div>
         <div class="field full">
           <button type="submit" class="btn btn-primary">機体を追加</button>
@@ -927,8 +1044,8 @@ async function renderDrones() {
     if (!name || !name.trim()) return;
     await api.drones.create({
       name: name.trim(),
-      model: fd.get('model'),
-      serial_number: fd.get('serial_number'),
+      pilot_name: fd.get('pilot_name'),
+      registration_number: fd.get('registration_number'),
     });
     renderDrones();
   });
