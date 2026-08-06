@@ -38,6 +38,11 @@ const FLIGHTS_COL = 'flights';
 const CHECKLIST_COL = 'checklistItems';
 const DRONES_COL = 'drones';
 
+// ユーザーごとにデータを完全に分離する (/users/{uid}/{コレクション名})
+function userCol(name) {
+  return db.collection('users').doc(auth.currentUser.uid).collection(name);
+}
+
 function nowLocalString() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -55,15 +60,15 @@ function normalizeChecks(checks) {
 }
 
 async function seedChecklistIfEmpty() {
-  const snapshot = await db.collection(CHECKLIST_COL).limit(1).get();
+  const snapshot = await userCol(CHECKLIST_COL).limit(1).get();
   if (!snapshot.empty) return;
   const batch = db.batch();
   DEFAULT_PRE_ITEMS.forEach((label, idx) => {
-    const ref = db.collection(CHECKLIST_COL).doc();
+    const ref = userCol(CHECKLIST_COL).doc();
     batch.set(ref, { phase: 'pre', label, sort_order: idx, active: 1 });
   });
   DEFAULT_POST_ITEMS.forEach((label, idx) => {
-    const ref = db.collection(CHECKLIST_COL).doc();
+    const ref = userCol(CHECKLIST_COL).doc();
     batch.set(ref, { phase: 'post', label, sort_order: idx, active: 1 });
   });
   await batch.commit();
@@ -77,7 +82,7 @@ const api = {
 
   flights: {
     async _fetchAllSorted() {
-      const snap = await db.collection(FLIGHTS_COL).get();
+      const snap = await userCol(FLIGHTS_COL).get();
       const flights = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       return flights.sort(
         (a, b) =>
@@ -107,7 +112,7 @@ const api = {
       return this._fetchAllSorted();
     },
     async get(id) {
-      const doc = await db.collection(FLIGHTS_COL).doc(id).get();
+      const doc = await userCol(FLIGHTS_COL).doc(id).get();
       if (!doc.exists) throw new Error('飛行記録が見つかりません');
       return { id: doc.id, ...doc.data() };
     },
@@ -138,11 +143,11 @@ const api = {
         updated_at: now,
         created_at_ms: Date.now(),
       };
-      const ref = await db.collection(FLIGHTS_COL).add(flight);
+      const ref = await userCol(FLIGHTS_COL).add(flight);
       return { id: ref.id, ...flight };
     },
     async update(id, data) {
-      const ref = db.collection(FLIGHTS_COL).doc(id);
+      const ref = userCol(FLIGHTS_COL).doc(id);
       const doc = await ref.get();
       if (!doc.exists) throw new Error('飛行記録が見つかりません');
 
@@ -159,21 +164,21 @@ const api = {
       return { id: updatedDoc.id, ...updatedDoc.data() };
     },
     async remove(id) {
-      await db.collection(FLIGHTS_COL).doc(id).delete();
+      await userCol(FLIGHTS_COL).doc(id).delete();
       return null;
     },
   },
 
   checklist: {
     async list(phase, all) {
-      const snap = await db.collection(CHECKLIST_COL).get();
+      const snap = await userCol(CHECKLIST_COL).get();
       const items = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       return items
         .filter((i) => (!phase || i.phase === phase) && (all || i.active))
         .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || String(a.id).localeCompare(String(b.id)));
     },
     async create(data) {
-      const snap = await db.collection(CHECKLIST_COL).where('phase', '==', data.phase).get();
+      const snap = await userCol(CHECKLIST_COL).where('phase', '==', data.phase).get();
       const maxOrder = snap.docs.reduce((m, d) => Math.max(m, d.data().sort_order || 0), -1);
       const item = {
         phase: data.phase,
@@ -181,11 +186,11 @@ const api = {
         sort_order: maxOrder + 1,
         active: 1,
       };
-      const ref = await db.collection(CHECKLIST_COL).add(item);
+      const ref = await userCol(CHECKLIST_COL).add(item);
       return { id: ref.id, ...item };
     },
     async update(id, data) {
-      const ref = db.collection(CHECKLIST_COL).doc(id);
+      const ref = userCol(CHECKLIST_COL).doc(id);
       const patch = {};
       if (data.label !== undefined) patch.label = data.label;
       if (data.active !== undefined) patch.active = data.active ? 1 : 0;
@@ -195,14 +200,14 @@ const api = {
       return { id: doc.id, ...doc.data() };
     },
     async remove(id) {
-      await db.collection(CHECKLIST_COL).doc(id).delete();
+      await userCol(CHECKLIST_COL).doc(id).delete();
       return null;
     },
   },
 
   drones: {
     async list() {
-      const snap = await db.collection(DRONES_COL).get();
+      const snap = await userCol(DRONES_COL).get();
       return snap.docs
         .map((doc) => ({ id: doc.id, ...doc.data() }))
         .sort((a, b) => (b.created_at_ms || 0) - (a.created_at_ms || 0));
@@ -215,11 +220,11 @@ const api = {
         created_at: nowLocalString(),
         created_at_ms: Date.now(),
       };
-      const ref = await db.collection(DRONES_COL).add(drone);
+      const ref = await userCol(DRONES_COL).add(drone);
       return { id: ref.id, ...drone };
     },
     async remove(id) {
-      await db.collection(DRONES_COL).doc(id).delete();
+      await userCol(DRONES_COL).doc(id).delete();
       return null;
     },
   },
